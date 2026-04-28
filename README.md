@@ -1,4 +1,4 @@
-# Smart Lead Generator
+# LocalPulse-AI
 
 Streamlit app that uses Gemini to suggest high-demand areas, Google Places to find businesses, and OpenPyXL to download leads as an Excel file.
 
