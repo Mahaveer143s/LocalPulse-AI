@@ -7,12 +7,8 @@ import requests
 import streamlit as st
 from openpyxl import Workbook
 
-try:
-    import google.generativeai as genai
-except ImportError:
-    genai = None
 
-
+GEMINI_GENERATE_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-latest:generateContent"
 GOOGLE_PLACES_URL = "https://maps.googleapis.com/maps/api/place/textsearch/json"
 GOOGLE_DETAILS_URL = "https://maps.googleapis.com/maps/api/place/details/json"
 FOURSQUARE_SEARCH_URL = "https://api.foursquare.com/v3/places/search"
@@ -152,20 +148,41 @@ def render_support() -> None:
 
 
 def get_high_demand_areas(city: str, state: str, business_type: str, gemini_api_key: str) -> list[str]:
-    if genai is None:
-        raise RuntimeError("google-generativeai is not installed. Run: pip install -r requirements.txt")
-
-    genai.configure(api_key=gemini_api_key)
-    model = genai.GenerativeModel("gemini-1.5-flash")
-
     prompt = f"""
 Suggest top 5 high demand areas in {city}, {state}, India where {business_type}
 services are highly needed.
 
 Only return area names in comma-separated format. Do not include numbering.
 """
-    response = model.generate_content(prompt)
-    text = getattr(response, "text", "") or ""
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {
+                        "text": prompt,
+                    }
+                ]
+            }
+        ]
+    }
+    response = requests.post(
+        GEMINI_GENERATE_URL,
+        headers={
+            "Content-Type": "application/json",
+            "X-goog-api-key": gemini_api_key,
+        },
+        json=payload,
+        timeout=30,
+    )
+    response.raise_for_status()
+    data = response.json()
+    candidates = data.get("candidates", [])
+    text = ""
+
+    if candidates:
+        parts = candidates[0].get("content", {}).get("parts", [])
+        text = " ".join(part.get("text", "") for part in parts)
+
     areas = [area.strip(" \n\t.-0123456789") for area in text.split(",")]
     return [area for area in areas if area][:5]
 
@@ -540,6 +557,8 @@ st.caption("Find high-demand local areas with Gemini, search businesses with Goo
 
 if st.session_state.user_role != "Developer":
     st.info("Business users can contact support for setup. Demo mode is available for testing.")
+else:
+    st.info("Use OpenStreetMap Free for no-key testing. Use Google Places when you need the best real-time phone, website, status, and open-now data.")
 
 with st.sidebar:
     st.header("Settings")

@@ -1,4 +1,3 @@
 streamlit
 requests
 openpyxl
-google-generativeai
