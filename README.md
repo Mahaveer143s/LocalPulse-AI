@@ -16,7 +16,10 @@ Create `.streamlit/secrets.toml`:
 ```toml
 GOOGLE_API_KEY = "your_google_places_api_key"
 GEMINI_API_KEY = "your_gemini_api_key"
+FOURSQUARE_API_KEY = "your_foursquare_places_api_key"
 ```
+
+Google Places is the recommended provider for the best real-time business contact details. OpenStreetMap Free can be used without an API key, but contact fields are often incomplete.
 
 ## Deploy on Streamlit Community Cloud
 
@@ -28,6 +31,7 @@ GEMINI_API_KEY = "your_gemini_api_key"
 ```toml
 GOOGLE_API_KEY = "your_google_places_api_key"
 GEMINI_API_KEY = "your_gemini_api_key"
+FOURSQUARE_API_KEY = "your_foursquare_places_api_key"
 ```
 
 5. Deploy the app.

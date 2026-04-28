@@ -15,11 +15,13 @@ except ImportError:
 
 GOOGLE_PLACES_URL = "https://maps.googleapis.com/maps/api/place/textsearch/json"
 GOOGLE_DETAILS_URL = "https://maps.googleapis.com/maps/api/place/details/json"
+FOURSQUARE_SEARCH_URL = "https://api.foursquare.com/v3/places/search"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 OVERPASS_URL = "https://overpass-api.de/api/interpreter"
 OSM_USER_AGENT = "LocalPulse-AI/1.0 (support@localpulse.ai)"
 SUPPORT_EMAIL = "support@localpulse.ai"
 SUPPORT_PHONE = "+91 90000 00000"
+LEAD_PROVIDERS = ["Google Places", "OpenStreetMap Free", "Foursquare Places"]
 
 
 st.set_page_config(
@@ -35,14 +37,24 @@ def get_secret(name: str, default: str = "") -> str:
     return os.getenv(name, default)
 
 
+def get_provider_api_key(provider: str) -> str:
+    if provider == "Google Places":
+        return st.session_state.user_google_api_key or get_secret("GOOGLE_API_KEY")
+    if provider == "Foursquare Places":
+        return st.session_state.user_foursquare_api_key or get_secret("FOURSQUARE_API_KEY")
+    return ""
+
+
 def init_session() -> None:
     defaults = {
         "is_logged_in": False,
         "user_name": "",
         "user_email": "",
         "user_role": "Business User",
+        "lead_provider": "OpenStreetMap Free",
         "user_google_api_key": "",
         "user_gemini_api_key": "",
+        "user_foursquare_api_key": "",
     }
 
     for key, value in defaults.items():
@@ -50,7 +62,14 @@ def init_session() -> None:
 
 
 def has_user_api_keys() -> bool:
-    return bool(st.session_state.user_google_api_key and st.session_state.user_gemini_api_key)
+    provider = st.session_state.lead_provider
+    if provider == "OpenStreetMap Free":
+        return True
+    if provider == "Google Places":
+        return bool(st.session_state.user_google_api_key)
+    if provider == "Foursquare Places":
+        return bool(st.session_state.user_foursquare_api_key)
+    return False
 
 
 def render_login() -> None:
@@ -80,31 +99,46 @@ def render_profile() -> None:
     st.caption(f"Logged in as {st.session_state.user_name} ({st.session_state.user_role})")
 
     if st.session_state.user_role == "Developer":
-        st.subheader("Developer API Keys")
-        st.info("These keys are kept only in your current browser session. They are not saved to GitHub.")
+        st.subheader("Lead Data Provider")
+        st.info("Google Places gives the strongest real-time business contact details. OpenStreetMap is free but contact data is often limited.")
 
-        with st.form("api_keys_form"):
+        with st.form("provider_form"):
+            provider = st.radio(
+                "Choose provider",
+                LEAD_PROVIDERS,
+                index=LEAD_PROVIDERS.index(st.session_state.lead_provider),
+            )
             google_key = st.text_input(
                 "Google Maps API Key",
                 value=st.session_state.user_google_api_key,
                 type="password",
+                help="Needed for Google Places real business contact details.",
             )
             gemini_key = st.text_input(
                 "Gemini API Key",
                 value=st.session_state.user_gemini_api_key,
                 type="password",
+                help="Needed only when you want AI to suggest high-demand areas automatically.",
             )
-            saved = st.form_submit_button("Save Keys", type="primary", use_container_width=True)
+            foursquare_key = st.text_input(
+                "Foursquare Places API Key",
+                value=st.session_state.user_foursquare_api_key,
+                type="password",
+                help="Optional alternative POI provider.",
+            )
+            saved = st.form_submit_button("Save Profile", type="primary", use_container_width=True)
 
         if saved:
+            st.session_state.lead_provider = provider
             st.session_state.user_google_api_key = google_key.strip()
             st.session_state.user_gemini_api_key = gemini_key.strip()
-            st.success("API keys saved for this session.")
+            st.session_state.user_foursquare_api_key = foursquare_key.strip()
+            st.success("Profile saved for this session.")
 
         if has_user_api_keys():
-            st.success("Developer keys are ready. Go to Generate Leads.")
+            st.success(f"{st.session_state.lead_provider} is ready. Go to Generate Leads.")
         else:
-            st.warning("Add both keys to run real Google Places + Gemini searches.")
+            st.warning("Add the API key needed by your selected provider, or choose OpenStreetMap Free.")
     else:
         render_support()
 
@@ -171,7 +205,7 @@ def search_places(query: str, location: str, google_api_key: str) -> list[dict]:
 def get_details(place_id: str, google_api_key: str) -> dict:
     params = {
         "place_id": place_id,
-        "fields": "name,formatted_phone_number,formatted_address,website,rating",
+        "fields": "name,formatted_phone_number,international_phone_number,formatted_address,website,rating,business_status,opening_hours",
         "key": google_api_key,
     }
     response = requests.get(GOOGLE_DETAILS_URL, params=params, timeout=20)
@@ -184,6 +218,50 @@ def get_details(place_id: str, google_api_key: str) -> dict:
         raise RuntimeError(message)
 
     return payload.get("result", {})
+
+
+def search_foursquare_places(query: str, location: str, api_key: str, limit: int) -> list[dict]:
+    params = {
+        "query": query,
+        "near": location,
+        "limit": limit,
+        "fields": "fsq_id,name,location,tel,email,website,rating,closed_bucket",
+    }
+    headers = {
+        "Accept": "application/json",
+        "Authorization": api_key,
+        "X-Places-Api-Version": "1970-01-01",
+    }
+    response = requests.get(FOURSQUARE_SEARCH_URL, params=params, headers=headers, timeout=25)
+    response.raise_for_status()
+    results = response.json().get("results", [])
+    rows = []
+
+    for place in results[:limit]:
+        location_data = place.get("location", {})
+        rows.append(
+            {
+                "Name": place.get("name"),
+                "Phone": place.get("tel"),
+                "Address": location_data.get("formatted_address") or ", ".join(
+                    part
+                    for part in [
+                        location_data.get("address"),
+                        location_data.get("locality"),
+                        location_data.get("region"),
+                    ]
+                    if part
+                ),
+                "Website": place.get("website"),
+                "Rating": place.get("rating"),
+                "Status": place.get("closed_bucket"),
+                "Open Now": "",
+                "Area": location.split(",")[0].strip(),
+                "Source": "Foursquare",
+            }
+        )
+
+    return rows
 
 
 def get_osm_bbox(location: str) -> list[float]:
@@ -276,7 +354,10 @@ def rows_from_osm_elements(elements: list[dict], location: str, limit: int) -> l
                 "Address": address,
                 "Website": tags.get("website") or tags.get("contact:website"),
                 "Rating": "",
+                "Status": "",
+                "Open Now": "",
                 "Area": location.split(",")[0].strip(),
+                "Source": "OpenStreetMap",
             }
         )
 
@@ -310,7 +391,7 @@ def search_osm_places(business_type: str, location: str, limit: int) -> list[dic
     return rows_from_osm_elements(elements, location, limit)
 
 
-LEAD_COLUMNS = ["Name", "Phone", "Address", "Website", "Rating", "Area"]
+LEAD_COLUMNS = ["Name", "Phone", "Address", "Website", "Rating", "Status", "Open Now", "Area", "Source"]
 
 
 def build_excel_download(rows: list[dict]) -> bytes:
@@ -377,7 +458,10 @@ def demo_leads(city: str, state: str, business_type: str, areas: list[str]) -> l
                     "Address": f"{area}, {city}, {state}, India",
                     "Website": f"https://example.com/{area.lower().replace(' ', '-')}-{index}",
                     "Rating": round(4.0 + index / 10, 1),
+                    "Status": "Demo",
+                    "Open Now": "",
                     "Area": area,
+                    "Source": "Demo",
                 }
             )
     return rows
@@ -389,6 +473,7 @@ def render_api_keys_help() -> None:
         st.code(
             """GOOGLE_API_KEY = "your_google_places_key"
 GEMINI_API_KEY = "your_gemini_key"
+FOURSQUARE_API_KEY = "your_foursquare_key"
 """,
             language="toml",
         )
@@ -443,6 +528,7 @@ with st.sidebar:
         st.session_state.user_email = ""
         st.session_state.user_google_api_key = ""
         st.session_state.user_gemini_api_key = ""
+        st.session_state.user_foursquare_api_key = ""
         st.rerun()
 
 if page == "Profile":
@@ -457,13 +543,18 @@ if st.session_state.user_role != "Developer":
 
 with st.sidebar:
     st.header("Settings")
-    lead_source = st.selectbox("Lead source", ["OpenStreetMap Free", "Google Places"])
+    lead_source = st.selectbox(
+        "Lead source",
+        LEAD_PROVIDERS,
+        index=LEAD_PROVIDERS.index(st.session_state.lead_provider),
+    )
+    st.session_state.lead_provider = lead_source
     use_demo_data = st.toggle("Demo mode", value=True, help="Test the UI and Excel download without API keys.")
     max_limit = 10 if lead_source == "OpenStreetMap Free" else 20
     max_places_per_area = st.slider("Max leads per area", min_value=1, max_value=max_limit, value=min(10, max_limit))
     render_api_keys_help()
 
-google_api_key = st.session_state.user_google_api_key or get_secret("GOOGLE_API_KEY")
+provider_api_key = get_provider_api_key(lead_source)
 gemini_api_key = st.session_state.user_gemini_api_key or get_secret("GEMINI_API_KEY")
 
 left, right = st.columns(2)
@@ -493,8 +584,8 @@ if generate:
         render_support()
         st.stop()
 
-    if not use_demo_data and lead_source == "Google Places" and not google_api_key:
-        st.error("Real mode needs GOOGLE_API_KEY. Add it in Profile or turn on Demo mode.")
+    if not use_demo_data and lead_source != "OpenStreetMap Free" and not provider_api_key:
+        st.error(f"{lead_source} needs an API key. Add it in Profile or turn on Demo mode.")
         st.stop()
 
     if not use_demo_data and not has_manual_areas and not gemini_api_key:
@@ -532,19 +623,26 @@ if generate:
                 if lead_source == "OpenStreetMap Free":
                     all_data.extend(search_osm_places(business_type, location, max_places_per_area))
                     time.sleep(1)
+                elif lead_source == "Foursquare Places":
+                    all_data.extend(search_foursquare_places(business_type, location, provider_api_key, max_places_per_area))
                 else:
-                    places = search_places(business_type, location, google_api_key)
+                    places = search_places(business_type, location, provider_api_key)
 
                     for place in places[:max_places_per_area]:
-                        details = get_details(place["place_id"], google_api_key)
+                        details = get_details(place["place_id"], provider_api_key)
+                        opening_hours = details.get("opening_hours") or {}
+                        open_now = opening_hours.get("open_now")
                         all_data.append(
                             {
                                 "Name": details.get("name"),
-                                "Phone": details.get("formatted_phone_number"),
+                                "Phone": details.get("formatted_phone_number") or details.get("international_phone_number"),
                                 "Address": details.get("formatted_address"),
                                 "Website": details.get("website"),
                                 "Rating": details.get("rating"),
+                                "Status": details.get("business_status"),
+                                "Open Now": "" if open_now is None else ("Yes" if open_now else "No"),
                                 "Area": area,
+                                "Source": "Google Places",
                             }
                         )
 
@@ -554,6 +652,10 @@ if generate:
 
             if lead_source == "OpenStreetMap Free":
                 st.caption("Data source: OpenStreetMap contributors. Free source may have fewer phone numbers and websites.")
+            elif lead_source == "Foursquare Places":
+                st.caption("Data source: Foursquare Places. Contact fields depend on provider coverage and your API plan.")
+            else:
+                st.caption("Data source: Google Places. This is the best option for real-time business contact details.")
 
         st.subheader("Generated Leads")
         st.caption(f"{len(leads)} leads")
