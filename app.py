@@ -15,6 +15,8 @@ except ImportError:
 
 GOOGLE_PLACES_URL = "https://maps.googleapis.com/maps/api/place/textsearch/json"
 GOOGLE_DETAILS_URL = "https://maps.googleapis.com/maps/api/place/details/json"
+SUPPORT_EMAIL = "support@localpulse.ai"
+SUPPORT_PHONE = "+91 90000 00000"
 
 
 st.set_page_config(
@@ -28,6 +30,88 @@ def get_secret(name: str, default: str = "") -> str:
     if name in st.secrets:
         return st.secrets[name]
     return os.getenv(name, default)
+
+
+def init_session() -> None:
+    defaults = {
+        "is_logged_in": False,
+        "user_name": "",
+        "user_email": "",
+        "user_role": "Business User",
+        "user_google_api_key": "",
+        "user_gemini_api_key": "",
+    }
+
+    for key, value in defaults.items():
+        st.session_state.setdefault(key, value)
+
+
+def has_user_api_keys() -> bool:
+    return bool(st.session_state.user_google_api_key and st.session_state.user_gemini_api_key)
+
+
+def render_login() -> None:
+    st.title("LocalPulse-AI")
+    st.caption("Sign in to generate local business leads.")
+
+    with st.form("login_form"):
+        name = st.text_input("Name")
+        email = st.text_input("Email")
+        role = st.radio("Account type", ["Business User", "Developer"], horizontal=True)
+        submitted = st.form_submit_button("Login", type="primary", use_container_width=True)
+
+    if submitted:
+        if not name.strip() or not email.strip():
+            st.error("Please enter your name and email.")
+            st.stop()
+
+        st.session_state.is_logged_in = True
+        st.session_state.user_name = name.strip()
+        st.session_state.user_email = email.strip()
+        st.session_state.user_role = role
+        st.rerun()
+
+
+def render_profile() -> None:
+    st.title("Profile")
+    st.caption(f"Logged in as {st.session_state.user_name} ({st.session_state.user_role})")
+
+    if st.session_state.user_role == "Developer":
+        st.subheader("Developer API Keys")
+        st.info("These keys are kept only in your current browser session. They are not saved to GitHub.")
+
+        with st.form("api_keys_form"):
+            google_key = st.text_input(
+                "Google Maps API Key",
+                value=st.session_state.user_google_api_key,
+                type="password",
+            )
+            gemini_key = st.text_input(
+                "Gemini API Key",
+                value=st.session_state.user_gemini_api_key,
+                type="password",
+            )
+            saved = st.form_submit_button("Save Keys", type="primary", use_container_width=True)
+
+        if saved:
+            st.session_state.user_google_api_key = google_key.strip()
+            st.session_state.user_gemini_api_key = gemini_key.strip()
+            st.success("API keys saved for this session.")
+
+        if has_user_api_keys():
+            st.success("Developer keys are ready. Go to Generate Leads.")
+        else:
+            st.warning("Add both keys to run real Google Places + Gemini searches.")
+    else:
+        render_support()
+
+
+def render_support() -> None:
+    st.subheader("Contact Support")
+    st.write("If you are not a developer, contact us and we will help you set up lead generation.")
+    st.write(f"Email: {SUPPORT_EMAIL}")
+    st.write(f"Phone: {SUPPORT_PHONE}")
+    st.link_button("Send Email", f"mailto:{SUPPORT_EMAIL}?subject=LocalPulse-AI%20Support")
 
 
 def get_high_demand_areas(city: str, state: str, business_type: str, gemini_api_key: str) -> list[str]:
@@ -174,7 +258,7 @@ def demo_leads(city: str, state: str, business_type: str, areas: list[str]) -> l
 
 def render_api_keys_help() -> None:
     with st.sidebar.expander("API key setup"):
-        st.write("For real leads, add keys in `.streamlit/secrets.toml` or environment variables:")
+        st.write("Developers can add keys from Profile. Deployed app owners can also add Streamlit secrets:")
         st.code(
             """GOOGLE_API_KEY = "your_google_places_key"
 GEMINI_API_KEY = "your_gemini_key"
@@ -216,8 +300,33 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
+init_session()
+
+if not st.session_state.is_logged_in:
+    render_login()
+    st.stop()
+
+with st.sidebar:
+    st.header("LocalPulse-AI")
+    st.write(st.session_state.user_name)
+    page = st.radio("Menu", ["Generate Leads", "Profile"], label_visibility="collapsed")
+    if st.button("Logout", use_container_width=True):
+        st.session_state.is_logged_in = False
+        st.session_state.user_name = ""
+        st.session_state.user_email = ""
+        st.session_state.user_google_api_key = ""
+        st.session_state.user_gemini_api_key = ""
+        st.rerun()
+
+if page == "Profile":
+    render_profile()
+    st.stop()
+
 st.title("Smart Lead Generator")
 st.caption("Find high-demand local areas with Gemini, search businesses with Google Places, and download leads as Excel.")
+
+if st.session_state.user_role != "Developer":
+    st.info("Business users can contact support for setup. Demo mode is available for testing.")
 
 with st.sidebar:
     st.header("Settings")
@@ -225,8 +334,8 @@ with st.sidebar:
     max_places_per_area = st.slider("Max leads per area", min_value=1, max_value=20, value=10)
     render_api_keys_help()
 
-google_api_key = get_secret("GOOGLE_API_KEY")
-gemini_api_key = get_secret("GEMINI_API_KEY")
+google_api_key = st.session_state.user_google_api_key or get_secret("GOOGLE_API_KEY")
+gemini_api_key = st.session_state.user_gemini_api_key or get_secret("GEMINI_API_KEY")
 
 left, right = st.columns(2)
 
@@ -250,12 +359,17 @@ if generate:
 
     has_manual_areas = bool(manual_areas.strip())
 
+    if st.session_state.user_role != "Developer" and not use_demo_data:
+        st.error("Real lead generation is available for developers. Please contact support for setup.")
+        render_support()
+        st.stop()
+
     if not use_demo_data and not google_api_key:
-        st.error("Real mode needs GOOGLE_API_KEY. Turn on Demo mode or add the key.")
+        st.error("Real mode needs GOOGLE_API_KEY. Add it in Profile or turn on Demo mode.")
         st.stop()
 
     if not use_demo_data and not has_manual_areas and not gemini_api_key:
-        st.error("AI area suggestions need GEMINI_API_KEY. Add areas manually or turn on Demo mode.")
+        st.error("AI area suggestions need GEMINI_API_KEY. Add it in Profile, enter areas manually, or turn on Demo mode.")
         st.stop()
 
     try:
