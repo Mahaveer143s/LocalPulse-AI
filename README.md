@@ -21,6 +21,8 @@ FOURSQUARE_API_KEY = "your_foursquare_places_api_key"
 
 Google Places is the recommended provider for the best real-time business contact details. OpenStreetMap Free can be used without an API key, but contact fields are often incomplete.
 
+The app supports custom lead targets up to 1000. Google Places returns the strongest business profile details and Google Maps profile links when a valid Places API key is configured. Free OpenStreetMap mode can be used without a key, but public OSM data may not include phone numbers, websites, ratings, or live business status.
+
 ## Deploy on Streamlit Community Cloud
 
 1. Push this folder to a GitHub repository.

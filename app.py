@@ -18,6 +18,12 @@ OSM_USER_AGENT = "LocalPulse-AI/1.0 (support@localpulse.ai)"
 SUPPORT_EMAIL = "support@localpulse.ai"
 SUPPORT_PHONE = "+91 90000 00000"
 LEAD_PROVIDERS = ["Google Places", "OpenStreetMap Free", "Foursquare Places"]
+AREA_FINDERS = ["Gemini AI", "Free Area Finder"]
+PROVIDER_CAPS = {
+    "Google Places": 60,
+    "Foursquare Places": 50,
+    "OpenStreetMap Free": 1000,
+}
 
 
 st.set_page_config(
@@ -147,9 +153,9 @@ def render_support() -> None:
     st.link_button("Send Email", f"mailto:{SUPPORT_EMAIL}?subject=LocalPulse-AI%20Support")
 
 
-def get_high_demand_areas(city: str, state: str, business_type: str, gemini_api_key: str) -> list[str]:
+def get_high_demand_areas(city: str, state: str, business_type: str, gemini_api_key: str, count: int) -> list[str]:
     prompt = f"""
-Suggest top 5 high demand areas in {city}, {state}, India where {business_type}
+Suggest top {count} high demand areas in {city}, {state}, India where {business_type}
 services are highly needed.
 
 Only return area names in comma-separated format. Do not include numbering.
@@ -184,7 +190,82 @@ Only return area names in comma-separated format. Do not include numbering.
         text = " ".join(part.get("text", "") for part in parts)
 
     areas = [area.strip(" \n\t.-0123456789") for area in text.split(",")]
-    return [area for area in areas if area][:5]
+    return [area for area in areas if area][:count]
+
+
+def get_free_high_demand_areas(city: str, business_type: str, count: int) -> list[str]:
+    known_areas = {
+        "hyderabad": [
+            "Madhapur",
+            "Gachibowli",
+            "Kondapur",
+            "HITEC City",
+            "Jubilee Hills",
+            "Banjara Hills",
+            "Kukatpally",
+            "Miyapur",
+            "Manikonda",
+            "Financial District",
+            "Begumpet",
+            "Ameerpet",
+        ],
+        "vijayawada": [
+            "Benz Circle",
+            "Governorpet",
+            "Patamata",
+            "Auto Nagar",
+            "Moghalrajpuram",
+            "Labbipet",
+            "Kanuru",
+            "Poranki",
+        ],
+        "bengaluru": [
+            "Whitefield",
+            "Indiranagar",
+            "Koramangala",
+            "HSR Layout",
+            "Jayanagar",
+            "Marathahalli",
+            "Electronic City",
+            "Yelahanka",
+            "Hebbal",
+            "JP Nagar",
+        ],
+        "bangalore": [
+            "Whitefield",
+            "Indiranagar",
+            "Koramangala",
+            "HSR Layout",
+            "Jayanagar",
+            "Marathahalli",
+            "Electronic City",
+            "Yelahanka",
+            "Hebbal",
+            "JP Nagar",
+        ],
+    }
+    generic_areas = [
+        "Central Business District",
+        "Main Market",
+        "Commercial Street",
+        "Industrial Area",
+        "Tech Park",
+        "Residential Growth Corridor",
+        "Ring Road",
+        "New Township",
+        "Railway Station Area",
+        "Bus Stand Area",
+    ]
+    areas = known_areas.get(city.lower().strip(), generic_areas)
+
+    if business_type in {"Web Development", "Interior Designers"}:
+        priority_words = ("Tech", "HITEC", "Financial", "Business", "Commercial")
+        areas = sorted(areas, key=lambda area: not any(word.lower() in area.lower() for word in priority_words))
+    elif business_type in {"Builders", "Construction", "Real Estate"}:
+        priority_words = ("Growth", "Township", "Ring", "Financial", "Kondapur", "Whitefield", "Miyapur")
+        areas = sorted(areas, key=lambda area: not any(word.lower() in area.lower() for word in priority_words))
+
+    return areas[:count]
 
 
 def search_places(query: str, location: str, google_api_key: str) -> list[dict]:
@@ -237,6 +318,10 @@ def get_details(place_id: str, google_api_key: str) -> dict:
     return payload.get("result", {})
 
 
+def google_maps_profile_url(place_id: str, name: str) -> str:
+    return f"https://www.google.com/maps/search/?api=1&query={requests.utils.quote(name or '')}&query_place_id={place_id}"
+
+
 def search_foursquare_places(query: str, location: str, api_key: str, limit: int) -> list[dict]:
     params = {
         "query": query,
@@ -275,6 +360,7 @@ def search_foursquare_places(query: str, location: str, api_key: str, limit: int
                 "Open Now": "",
                 "Area": location.split(",")[0].strip(),
                 "Source": "Foursquare",
+                "Profile URL": f"https://foursquare.com/v/{place.get('fsq_id')}" if place.get("fsq_id") else "",
             }
         )
 
@@ -375,6 +461,7 @@ def rows_from_osm_elements(elements: list[dict], location: str, limit: int) -> l
                 "Open Now": "",
                 "Area": location.split(",")[0].strip(),
                 "Source": "OpenStreetMap",
+                "Profile URL": f"https://www.openstreetmap.org/{element.get('type')}/{element.get('id')}",
             }
         )
 
@@ -408,7 +495,7 @@ def search_osm_places(business_type: str, location: str, limit: int) -> list[dic
     return rows_from_osm_elements(elements, location, limit)
 
 
-LEAD_COLUMNS = ["Name", "Phone", "Address", "Website", "Rating", "Status", "Open Now", "Area", "Source"]
+LEAD_COLUMNS = ["Name", "Phone", "Address", "Website", "Rating", "Status", "Open Now", "Area", "Source", "Profile URL"]
 
 
 def build_excel_download(rows: list[dict]) -> bytes:
@@ -479,6 +566,7 @@ def demo_leads(city: str, state: str, business_type: str, areas: list[str]) -> l
                     "Open Now": "",
                     "Area": area,
                     "Source": "Demo",
+                    "Profile URL": "",
                 }
             )
     return rows
@@ -568,9 +656,10 @@ with st.sidebar:
         index=LEAD_PROVIDERS.index(st.session_state.lead_provider),
     )
     st.session_state.lead_provider = lead_source
+    area_finder = st.selectbox("Area finder", AREA_FINDERS)
+    area_count = st.slider("Top areas", min_value=1, max_value=20, value=5)
     use_demo_data = st.toggle("Demo mode", value=True, help="Test the UI and Excel download without API keys.")
-    max_limit = 10 if lead_source == "OpenStreetMap Free" else 20
-    max_places_per_area = st.slider("Max leads per area", min_value=1, max_value=max_limit, value=min(10, max_limit))
+    target_leads = st.number_input("Target total leads", min_value=1, max_value=1000, value=50, step=10)
     render_api_keys_help()
 
 provider_api_key = get_provider_api_key(lead_source)
@@ -607,8 +696,8 @@ if generate:
         st.error(f"{lead_source} needs an API key. Add it in Profile or turn on Demo mode.")
         st.stop()
 
-    if not use_demo_data and not has_manual_areas and not gemini_api_key:
-        st.error("AI area suggestions need GEMINI_API_KEY. Add it in Profile, enter areas manually, or turn on Demo mode.")
+    if not use_demo_data and not has_manual_areas and area_finder == "Gemini AI" and not gemini_api_key:
+        st.error("Gemini AI area suggestions need GEMINI_API_KEY. Add it in Profile, choose Free Area Finder, enter areas manually, or turn on Demo mode.")
         st.stop()
 
     try:
@@ -617,9 +706,12 @@ if generate:
         elif use_demo_data:
             with st.spinner("Preparing demo high-demand areas..."):
                 areas = demo_areas(city)
+        elif area_finder == "Free Area Finder":
+            with st.spinner("Finding leading areas with the free area finder..."):
+                areas = get_free_high_demand_areas(city, business_type, area_count)
         else:
             with st.spinner("Finding high-demand areas using Gemini..."):
-                areas = get_high_demand_areas(city, state, business_type, gemini_api_key)
+                areas = get_high_demand_areas(city, state, business_type, gemini_api_key, area_count)
 
         if not areas:
             st.warning("No areas found. Try entering areas manually.")
@@ -634,20 +726,27 @@ if generate:
             all_data = []
             progress = st.progress(0)
             status = st.empty()
+            provider_cap = PROVIDER_CAPS.get(lead_source, 50)
+            per_area_limit = min(provider_cap, max(1, (int(target_leads) + len(areas) - 1) // len(areas)))
 
             for area_index, area in enumerate(areas, start=1):
+                if len(all_data) >= int(target_leads):
+                    break
+
                 location = f"{area}, {city}, {state}, India"
                 status.write(f"Searching {business_type} in {area}...")
+                remaining_leads = int(target_leads) - len(all_data)
+                current_limit = min(per_area_limit, remaining_leads)
 
                 if lead_source == "OpenStreetMap Free":
-                    all_data.extend(search_osm_places(business_type, location, max_places_per_area))
+                    all_data.extend(search_osm_places(business_type, location, current_limit))
                     time.sleep(1)
                 elif lead_source == "Foursquare Places":
-                    all_data.extend(search_foursquare_places(business_type, location, provider_api_key, max_places_per_area))
+                    all_data.extend(search_foursquare_places(business_type, location, provider_api_key, current_limit))
                 else:
                     places = search_places(business_type, location, provider_api_key)
 
-                    for place in places[:max_places_per_area]:
+                    for place in places[:current_limit]:
                         details = get_details(place["place_id"], provider_api_key)
                         opening_hours = details.get("opening_hours") or {}
                         open_now = opening_hours.get("open_now")
@@ -662,6 +761,7 @@ if generate:
                                 "Open Now": "" if open_now is None else ("Yes" if open_now else "No"),
                                 "Area": area,
                                 "Source": "Google Places",
+                                "Profile URL": google_maps_profile_url(place["place_id"], details.get("name")),
                             }
                         )
 
