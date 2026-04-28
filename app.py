@@ -15,6 +15,9 @@ except ImportError:
 
 GOOGLE_PLACES_URL = "https://maps.googleapis.com/maps/api/place/textsearch/json"
 GOOGLE_DETAILS_URL = "https://maps.googleapis.com/maps/api/place/details/json"
+NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+OSM_USER_AGENT = "LocalPulse-AI/1.0 (support@localpulse.ai)"
 SUPPORT_EMAIL = "support@localpulse.ai"
 SUPPORT_PHONE = "+91 90000 00000"
 
@@ -183,6 +186,130 @@ def get_details(place_id: str, google_api_key: str) -> dict:
     return payload.get("result", {})
 
 
+def get_osm_bbox(location: str) -> list[float]:
+    params = {
+        "q": location,
+        "format": "json",
+        "limit": 1,
+    }
+    response = requests.get(
+        NOMINATIM_URL,
+        params=params,
+        headers={"User-Agent": OSM_USER_AGENT},
+        timeout=20,
+    )
+    response.raise_for_status()
+    payload = response.json()
+
+    if not payload:
+        raise RuntimeError(f"OpenStreetMap could not find {location}")
+
+    south, north, west, east = payload[0]["boundingbox"]
+    return [float(south), float(west), float(north), float(east)]
+
+
+def get_osm_filters(business_type: str) -> list[tuple[str, str]]:
+    filters = {
+        "Interior Designers": [("office", "interior_design"), ("shop", "furniture")],
+        "Builders": [("office", "construction_company"), ("craft", "builder")],
+        "Construction": [("office", "construction_company"), ("craft", "builder")],
+        "Web Development": [("office", "it"), ("office", "company")],
+        "Real Estate": [("office", "estate_agent")],
+    }
+    return filters.get(business_type, [("office", "company")])
+
+
+def build_osm_query(business_type: str, bbox: str, limit: int, broad: bool = False) -> str:
+    if broad:
+        selectors = [
+            f'node["office"]["name"]({bbox});',
+            f'way["office"]["name"]({bbox});',
+            f'relation["office"]["name"]({bbox});',
+            f'node["shop"]["name"]({bbox});',
+            f'way["shop"]["name"]({bbox});',
+            f'relation["shop"]["name"]({bbox});',
+        ]
+    else:
+        selectors = []
+        for key, value in get_osm_filters(business_type):
+            selectors.extend(
+                [
+                    f'node["{key}"="{value}"]({bbox});',
+                    f'way["{key}"="{value}"]({bbox});',
+                    f'relation["{key}"="{value}"]({bbox});',
+                ]
+            )
+
+    return f"""
+[out:json][timeout:25];
+(
+  {''.join(selectors)}
+);
+out center tags {limit};
+"""
+
+
+def rows_from_osm_elements(elements: list[dict], location: str, limit: int) -> list[dict]:
+    rows = []
+
+    for element in elements:
+        if len(rows) >= limit:
+            break
+
+        tags = element.get("tags", {})
+        name = tags.get("name")
+        if not name:
+            continue
+
+        address_parts = [
+            tags.get("addr:housenumber"),
+            tags.get("addr:street"),
+            tags.get("addr:suburb"),
+            tags.get("addr:city"),
+        ]
+        address = ", ".join(part for part in address_parts if part) or location
+
+        rows.append(
+            {
+                "Name": name,
+                "Phone": tags.get("phone") or tags.get("contact:phone"),
+                "Address": address,
+                "Website": tags.get("website") or tags.get("contact:website"),
+                "Rating": "",
+                "Area": location.split(",")[0].strip(),
+            }
+        )
+
+    return rows
+
+
+def run_overpass_query(query: str) -> list[dict]:
+    response = requests.post(
+        OVERPASS_URL,
+        data={"data": query},
+        headers={"User-Agent": OSM_USER_AGENT},
+        timeout=35,
+    )
+    response.raise_for_status()
+    return response.json().get("elements", [])
+
+
+def search_osm_places(business_type: str, location: str, limit: int) -> list[dict]:
+    south, west, north, east = get_osm_bbox(location)
+    bbox = f"{south},{west},{north},{east}"
+    rows = rows_from_osm_elements(run_overpass_query(build_osm_query(business_type, bbox, limit)), location, limit)
+
+    if rows:
+        return rows
+
+    city_location = ", ".join(part.strip() for part in location.split(",")[1:] if part.strip())
+    fallback_location = city_location or location
+    south, west, north, east = get_osm_bbox(fallback_location)
+    bbox = f"{south},{west},{north},{east}"
+    elements = run_overpass_query(build_osm_query(business_type, bbox, limit * 3, broad=True))
+    return rows_from_osm_elements(elements, location, limit)
+
+
 LEAD_COLUMNS = ["Name", "Phone", "Address", "Website", "Rating", "Area"]
 
 
@@ -330,8 +457,10 @@ if st.session_state.user_role != "Developer":
 
 with st.sidebar:
     st.header("Settings")
+    lead_source = st.selectbox("Lead source", ["OpenStreetMap Free", "Google Places"])
     use_demo_data = st.toggle("Demo mode", value=True, help="Test the UI and Excel download without API keys.")
-    max_places_per_area = st.slider("Max leads per area", min_value=1, max_value=20, value=10)
+    max_limit = 10 if lead_source == "OpenStreetMap Free" else 20
+    max_places_per_area = st.slider("Max leads per area", min_value=1, max_value=max_limit, value=min(10, max_limit))
     render_api_keys_help()
 
 google_api_key = st.session_state.user_google_api_key or get_secret("GOOGLE_API_KEY")
@@ -364,7 +493,7 @@ if generate:
         render_support()
         st.stop()
 
-    if not use_demo_data and not google_api_key:
+    if not use_demo_data and lead_source == "Google Places" and not google_api_key:
         st.error("Real mode needs GOOGLE_API_KEY. Add it in Profile or turn on Demo mode.")
         st.stop()
 
@@ -397,25 +526,34 @@ if generate:
             status = st.empty()
 
             for area_index, area in enumerate(areas, start=1):
+                location = f"{area}, {city}, {state}, India"
                 status.write(f"Searching {business_type} in {area}...")
-                places = search_places(business_type, f"{area}, {city}, {state}", google_api_key)
 
-                for place in places[:max_places_per_area]:
-                    details = get_details(place["place_id"], google_api_key)
-                    all_data.append(
-                        {
-                            "Name": details.get("name"),
-                            "Phone": details.get("formatted_phone_number"),
-                            "Address": details.get("formatted_address"),
-                            "Website": details.get("website"),
-                            "Rating": details.get("rating"),
-                            "Area": area,
-                        }
-                    )
+                if lead_source == "OpenStreetMap Free":
+                    all_data.extend(search_osm_places(business_type, location, max_places_per_area))
+                    time.sleep(1)
+                else:
+                    places = search_places(business_type, location, google_api_key)
+
+                    for place in places[:max_places_per_area]:
+                        details = get_details(place["place_id"], google_api_key)
+                        all_data.append(
+                            {
+                                "Name": details.get("name"),
+                                "Phone": details.get("formatted_phone_number"),
+                                "Address": details.get("formatted_address"),
+                                "Website": details.get("website"),
+                                "Rating": details.get("rating"),
+                                "Area": area,
+                            }
+                        )
 
                 progress.progress(area_index / len(areas))
 
             leads = all_data
+
+            if lead_source == "OpenStreetMap Free":
+                st.caption("Data source: OpenStreetMap contributors. Free source may have fewer phone numbers and websites.")
 
         st.subheader("Generated Leads")
         st.caption(f"{len(leads)} leads")
